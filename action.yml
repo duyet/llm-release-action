@@ -62,14 +62,6 @@ inputs:
     description: Model id for the AnyRouter fallback tier.
     required: false
     default: openai/gpt-4o-mini
-  anyrouter-source:
-    description: "AnyRouter app-attribution source slug (X-AnyRouter-Source). Defaults to project-name."
-    required: false
-    default: ""
-  anyrouter-title:
-    description: "AnyRouter app-attribution title (X-AnyRouter-Title). Defaults to project-name."
-    required: false
-    default: ""
   anyrouter-categories:
     description: "AnyRouter app-attribution category (X-AnyRouter-Categories)."
     required: false
@@ -250,12 +242,13 @@ runs:
         model: ${{ inputs.anyrouter-model }}
         prompt-file: ai-prompt.txt
         system-prompt-file: ${{ steps.prompt.outputs.system_prompt_file }}
-        # App attribution per AnyRouter docs: stable source slug + title +
-        # release version + a valid marketplace category.
+        # App attribution: this action always runs from GitHub Actions, so
+        # source/title/URL are hardcoded rather than per-repo configurable.
         custom-headers: |
           {
-            "X-AnyRouter-Source": "${{ inputs.anyrouter-source || steps.project.outputs.name }}",
-            "X-AnyRouter-Title": "${{ inputs.anyrouter-title || steps.project.outputs.name }}",
+            "X-AnyRouter-Source": "github-actions",
+            "X-AnyRouter-Title": "Github Actions",
+            "X-AnyRouter-Source-URL": "http://github.com/actions",
             "X-AnyRouter-Version": "${{ inputs.release-tag }}",
             "X-AnyRouter-Categories": "${{ inputs.anyrouter-categories }}"
           }
