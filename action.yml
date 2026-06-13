@@ -1,0 +1,327 @@
+name: LLM Release Action
+description: >-
+  Generate AI release notes (GitHub Copilot → GitHub Models → AnyRouter fallback)
+  with deterministic recap stats, a Docker-pull/Dockerfile block, a compare link,
+  and an optional paste-able migration prompt — then publish them to the GitHub
+  Release. Shared release logic for duyet's repos.
+author: duyet
+
+branding:
+  icon: tag
+  color: orange
+
+inputs:
+  release-tag:
+    description: Release tag to build notes for, e.g. v0.3.0.
+    required: true
+  previous-tag:
+    description: Previous tag for the compare link. Auto-detected from git when empty.
+    required: false
+    default: ""
+  project-name:
+    description: Human project name used in the default notes prompt and attribution. Defaults to the repo name.
+    required: false
+    default: ""
+
+  # --- Prompt overrides (all optional; bundled defaults are used otherwise) ---
+  notes-prompt-file:
+    description: Path to a repo-local release-notes prompt template. Falls back to the bundled generic template.
+    required: false
+    default: ""
+  system-prompt-file:
+    description: Path to a repo-local system prompt. Falls back to the bundled generic system prompt.
+    required: false
+    default: ""
+  migration-prompt-file:
+    description: Path to a repo-local migration prompt appended on breaking/non-patch releases.
+    required: false
+    default: ""
+  migration:
+    description: "Whether to append the migration prompt: auto | true | false."
+    required: false
+    default: auto
+
+  # --- LLM tiers ---
+  copilot-model:
+    description: Model id for the GitHub Copilot tier.
+    required: false
+    default: openai/gpt-4o
+  models-model:
+    description: Model id for the GitHub Models tier.
+    required: false
+    default: openai/gpt-4o
+  anyrouter-api-key:
+    description: AnyRouter API key. The AnyRouter tier only runs when this is set.
+    required: false
+    default: ""
+  anyrouter-endpoint:
+    description: AnyRouter OpenAI-compatible endpoint.
+    required: false
+    default: https://anyrouter.dev/api/v1
+  anyrouter-model:
+    description: Model id for the AnyRouter fallback tier.
+    required: false
+    default: openai/gpt-4o-mini
+  anyrouter-source:
+    description: "AnyRouter app-attribution source slug (X-AnyRouter-Source). Defaults to project-name."
+    required: false
+    default: ""
+  anyrouter-title:
+    description: "AnyRouter app-attribution title (X-AnyRouter-Title). Defaults to project-name."
+    required: false
+    default: ""
+  anyrouter-categories:
+    description: "AnyRouter app-attribution category (X-AnyRouter-Categories)."
+    required: false
+    default: programming-app
+
+  # --- Docker block ---
+  docker-image:
+    description: Primary published image, e.g. ghcr.io/duyet/<repo>. Enables the Docker section when set.
+    required: false
+    default: ""
+  docker-extra-image:
+    description: Optional second image name for the Docker section.
+    required: false
+    default: ""
+  docker-version:
+    description: Image tag for the Docker section. Defaults to the release tag without the leading v.
+    required: false
+    default: ""
+
+  # --- Publish ---
+  publish:
+    description: When true, create/update the GitHub Release body with the generated notes.
+    required: false
+    default: "true"
+  github-token:
+    description: Token for gh CLI (recap API + release publish).
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  notes-file:
+    description: Path to the generated release-notes.md.
+    value: ${{ steps.gen.outputs.notes-file }}
+  ai-provider:
+    description: Which LLM tier produced the summary (copilot | github-models | anyrouter | empty).
+    value: ${{ steps.summary.outputs.provider }}
+  migration:
+    description: Whether a migration section was appended (true/false).
+    value: ${{ steps.range.outputs.migration }}
+  previous-tag:
+    description: The resolved previous tag.
+    value: ${{ steps.range.outputs.previous_tag }}
+  range:
+    description: The resolved commit range.
+    value: ${{ steps.range.outputs.range }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
+    - name: Validate release tag
+      shell: bash
+      env:
+        RELEASE_TAG: ${{ inputs.release-tag }}
+      run: |
+        if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+          echo "Invalid release tag: $RELEASE_TAG" >&2; exit 1
+        fi
+
+    - name: Resolve project name
+      id: project
+      shell: bash
+      env:
+        PROJECT_NAME: ${{ inputs.project-name }}
+        GH_REPO: ${{ github.repository }}
+      run: |
+        NAME="$PROJECT_NAME"
+        [ -z "$NAME" ] && NAME="${GH_REPO##*/}"
+        echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+    - name: Compute commit range
+      id: range
+      shell: bash
+      env:
+        RELEASE_TAG: ${{ inputs.release-tag }}
+        PREVIOUS_TAG_INPUT: ${{ inputs.previous-tag }}
+        MIGRATION_INPUT: ${{ inputs.migration }}
+      run: |
+        if [ -n "$PREVIOUS_TAG_INPUT" ]; then
+          PREV="$PREVIOUS_TAG_INPUT"
+        else
+          PREV="$(git describe --tags --abbrev=0 "${RELEASE_TAG}^" 2>/dev/null || git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo '')"
+        fi
+        if [ -n "$PREV" ]; then RANGE="$PREV..HEAD"; else RANGE="HEAD"; fi
+        echo "previous_tag=$PREV" >> "$GITHUB_OUTPUT"
+        echo "range=$RANGE" >> "$GITHUB_OUTPUT"
+        # Decide migration: explicit override wins; otherwise auto = any non-patch
+        # bump (major/minor changed vs previous tag) or a breaking commit.
+        case "$MIGRATION_INPUT" in
+          true)  MIGRATION=true ;;
+          false) MIGRATION=false ;;
+          *)
+            CUR="${RELEASE_TAG#v}"; OLD="${PREV#v}"
+            MIGRATION=false
+            if [ -z "$PREV" ] || [ "${CUR%.*}" != "${OLD%.*}" ]; then MIGRATION=true; fi
+            if git log --pretty=format:'%B' "$RANGE" | grep -qE '(^|\W)BREAKING CHANGE|!:'; then MIGRATION=true; fi
+            ;;
+        esac
+        echo "migration=$MIGRATION" >> "$GITHUB_OUTPUT"
+
+    - name: Build release recap
+      id: recap
+      continue-on-error: true
+      shell: bash
+      env:
+        RANGE: ${{ steps.range.outputs.range }}
+        RELEASE_TAG: ${{ inputs.release-tag }}
+        PREVIOUS_TAG: ${{ steps.range.outputs.previous_tag }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: node "$GITHUB_ACTION_PATH/scripts/release-recap.mjs"
+
+    - name: Build AI prompt
+      id: prompt
+      shell: bash
+      env:
+        RELEASE_TAG: ${{ inputs.release-tag }}
+        RANGE: ${{ steps.range.outputs.range }}
+        PROJECT_NAME: ${{ steps.project.outputs.name }}
+        NOTES_PROMPT_FILE: ${{ inputs.notes-prompt-file }}
+        SYSTEM_PROMPT_FILE: ${{ inputs.system-prompt-file }}
+      run: |
+        # Resolve prompt templates: repo-local override or the bundled default.
+        if [ -n "$NOTES_PROMPT_FILE" ] && [ -f "$NOTES_PROMPT_FILE" ]; then
+          TEMPLATE="$(cat "$NOTES_PROMPT_FILE")"
+        else
+          TEMPLATE="$(cat "$GITHUB_ACTION_PATH/prompts/notes-prompt.md")"
+        fi
+        if [ -n "$SYSTEM_PROMPT_FILE" ] && [ -f "$SYSTEM_PROMPT_FILE" ]; then
+          SYS="$SYSTEM_PROMPT_FILE"
+        else
+          SYS="$GITHUB_ACTION_PATH/prompts/system-prompt.md"
+        fi
+        echo "system_prompt_file=$SYS" >> "$GITHUB_OUTPUT"
+
+        COMMITS="$(git log --pretty=format:'- %s' "$RANGE")"
+        RECAP="$( [ -f recap-facts.txt ] && cat recap-facts.txt || echo 'unavailable' )"
+        TEMPLATE="${TEMPLATE//\{\{PROJECT_NAME\}\}/$PROJECT_NAME}"
+        TEMPLATE="${TEMPLATE//\{\{RELEASE_TAG\}\}/$RELEASE_TAG}"
+        TEMPLATE="${TEMPLATE//\{\{RANGE\}\}/$RANGE}"
+        TEMPLATE="${TEMPLATE//\{\{RECAP\}\}/$RECAP}"
+        printf '%s' "${TEMPLATE//\{\{COMMITS\}\}/$COMMITS}" > ai-prompt.txt
+
+    # Tiered LLM summary, each best-effort so a release never fails on inference:
+    # GitHub Copilot → GitHub Models → AnyRouter (only when an API key is set).
+    - name: AI summary (GitHub Copilot)
+      id: ai_copilot
+      continue-on-error: true
+      uses: actions/ai-inference@v2
+      with:
+        provider: copilot
+        model: ${{ inputs.copilot-model }}
+        prompt-file: ai-prompt.txt
+        system-prompt-file: ${{ steps.prompt.outputs.system_prompt_file }}
+
+    - name: AI summary (GitHub Models)
+      id: ai_models
+      if: ${{ steps.ai_copilot.outputs.response == '' }}
+      continue-on-error: true
+      uses: actions/ai-inference@v2
+      with:
+        provider: github-models
+        model: ${{ inputs.models-model }}
+        prompt-file: ai-prompt.txt
+        system-prompt-file: ${{ steps.prompt.outputs.system_prompt_file }}
+
+    - name: AI summary (AnyRouter fallback)
+      id: ai_anyrouter
+      if: ${{ steps.ai_copilot.outputs.response == '' && steps.ai_models.outputs.response == '' && inputs.anyrouter-api-key != '' }}
+      continue-on-error: true
+      uses: actions/ai-inference@v2
+      with:
+        endpoint: ${{ inputs.anyrouter-endpoint }}
+        token: ${{ inputs.anyrouter-api-key }}
+        model: ${{ inputs.anyrouter-model }}
+        prompt-file: ai-prompt.txt
+        system-prompt-file: ${{ steps.prompt.outputs.system_prompt_file }}
+        # App attribution per AnyRouter docs: stable source slug + title +
+        # release version + a valid marketplace category.
+        custom-headers: |
+          {
+            "X-AnyRouter-Source": "${{ inputs.anyrouter-source || steps.project.outputs.name }}",
+            "X-AnyRouter-Title": "${{ inputs.anyrouter-title || steps.project.outputs.name }}",
+            "X-AnyRouter-Version": "${{ inputs.release-tag }}",
+            "X-AnyRouter-Categories": "${{ inputs.anyrouter-categories }}"
+          }
+
+    - name: Resolve AI summary
+      id: summary
+      shell: bash
+      env:
+        COPILOT_FILE: ${{ steps.ai_copilot.outputs.response-file }}
+        MODELS_FILE: ${{ steps.ai_models.outputs.response-file }}
+        ANYROUTER_FILE: ${{ steps.ai_anyrouter.outputs.response-file }}
+      run: |
+        if [ -n "$COPILOT_FILE" ] && [ -s "$COPILOT_FILE" ]; then cp "$COPILOT_FILE" ai-summary.md; P=copilot
+        elif [ -n "$MODELS_FILE" ] && [ -s "$MODELS_FILE" ]; then cp "$MODELS_FILE" ai-summary.md; P=github-models
+        elif [ -n "$ANYROUTER_FILE" ] && [ -s "$ANYROUTER_FILE" ]; then cp "$ANYROUTER_FILE" ai-summary.md; P=anyrouter
+        else : > ai-summary.md; P=; fi
+        echo "provider=$P" >> "$GITHUB_OUTPUT"
+
+    - name: Generate release notes
+      id: gen
+      shell: bash
+      env:
+        AI_PROVIDER: ${{ steps.summary.outputs.provider }}
+        RELEASE_TAG: ${{ inputs.release-tag }}
+        PREVIOUS_TAG: ${{ steps.range.outputs.previous_tag }}
+        DOCKER_IMAGE: ${{ inputs.docker-image }}
+        DOCKER_EXTRA_IMAGE: ${{ inputs.docker-extra-image }}
+        DOCKER_VERSION: ${{ inputs.docker-version }}
+      run: |
+        export AI_SUMMARY="$(cat ai-summary.md)"
+        export RECAP_MD="$( [ -f recap.md ] && cat recap.md || echo '' )"
+        node "$GITHUB_ACTION_PATH/scripts/generate-release-notes.mjs" > release-notes.md
+        echo "notes-file=release-notes.md" >> "$GITHUB_OUTPUT"
+
+    - name: Append migration prompt
+      if: ${{ steps.range.outputs.migration == 'true' && inputs.migration-prompt-file != '' }}
+      shell: bash
+      env:
+        MIGRATION_PROMPT_FILE: ${{ inputs.migration-prompt-file }}
+      run: |
+        if [ -f "$MIGRATION_PROMPT_FILE" ]; then
+          { echo ""; cat "$MIGRATION_PROMPT_FILE"; } >> release-notes.md
+        fi
+
+    - name: Publish GitHub release notes
+      if: ${{ inputs.publish == 'true' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        TAG: ${{ inputs.release-tag }}
+      run: |
+        NEW_NOTES="$(cat release-notes.md)"
+        if gh release view "$TAG" >/dev/null 2>&1; then
+          # Preserve prior manual notes, but avoid duplicating the generated block
+          # when the workflow re-runs for the same tag.
+          EXISTING="$(gh release view "$TAG" --json body --jq '.body // ""')"
+          if [ -n "$EXISTING" ] && [ "${EXISTING#"$NEW_NOTES"}" != "$EXISTING" ]; then
+            printf '%s\n' "$EXISTING" > final-notes.md
+          elif [ -n "$EXISTING" ]; then
+            printf '%s\n\n---\n\n%s\n' "$NEW_NOTES" "$EXISTING" > final-notes.md
+          else
+            printf '%s\n' "$NEW_NOTES" > final-notes.md
+          fi
+          gh release edit "$TAG" --title "$TAG" --notes-file final-notes.md
+        else
+          gh release create "$TAG" --title "$TAG" --notes-file release-notes.md
+        fi
+        gh release upload "$TAG" release-notes.md --clobber
+        [ -f recap.md ] && gh release upload "$TAG" recap.md --clobber || true

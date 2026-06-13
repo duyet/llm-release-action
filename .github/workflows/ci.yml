@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Syntax-check scripts
+        run: |
+          node --check scripts/release-recap.mjs
+          node --check scripts/generate-release-notes.mjs
+
+      - name: Smoke-test note rendering
+        env:
+          AI_SUMMARY: |
+            ## ✨ Features
+            - Do a new thing
+          AI_PROVIDER: copilot
+          RECAP_MD: "## 📊 Release recap\n\n- 📦 **3 commits**"
+          RELEASE_TAG: v9.9.9
+          PREVIOUS_TAG: v9.9.8
+          GITHUB_REPOSITORY: duyet/llm-release-action
+          GITHUB_SHA: 0123456789abcdef
+          DOCKER_IMAGE: ghcr.io/duyet/example
+        run: |
+          OUT="$(node scripts/generate-release-notes.mjs)"
+          echo "$OUT"
+          echo "$OUT" | grep -q "docker pull ghcr.io/duyet/example:9.9.9"
+          echo "$OUT" | grep -q "FROM ghcr.io/duyet/example:9.9.9"
+          echo "$OUT" | grep -q "compare/v9.9.8...v9.9.9"
+          echo "$OUT" | grep -q "summary by .copilot."
+
+      - name: Validate action.yml
+        run: |
+          node -e "const y=require('fs').readFileSync('action.yml','utf8'); if(!/using: composite/.test(y)){throw new Error('not composite')}"
