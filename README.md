@@ -18,24 +18,6 @@ Release body:
 Pairs with [`release-please`](https://github.com/googleapis/release-please-action)
 for the semver + tag + standing-changelog-PR half of the pipeline.
 
-## Why a home-grown action (not a marketplace one)
-
-[`nosovj/llm-release-action`](https://github.com/marketplace/actions/llm-release-action)
-is a capable LiteLLM-based action, but it does not fit these repos:
-
-| Requirement | This action | `nosovj/llm-release-action` |
-|---|---|---|
-| **GitHub Copilot first, no API key** | ✅ via `actions/ai-inference` `provider: copilot` (uses the repo's Copilot entitlement) | ❌ LiteLLM has no Copilot provider; needs paid keys |
-| **AnyRouter fallback + app-attribution headers** | ✅ `X-AnyRouter-Source/Title/Version/Categories` | ❌ no hook |
-| **Docker-tag injection / `FROM` snippet** | ✅ | ❌ |
-| **Recap stats + agent shoutout** | ✅ | ❌ |
-| **Auto migration prompt on breaking bumps** | ✅ | partial (breaking-change list only) |
-| **Supply-chain / ToS surface** | first-party | third-party |
-
-LiteLLM-based actions are a good fit when you already pay for a provider and want
-multi-audience changelogs; here, free Copilot inference + AnyRouter dog-fooding
-won out.
-
 ## Usage
 
 ```yaml
