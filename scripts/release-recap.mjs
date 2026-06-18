@@ -5,9 +5,9 @@
 //                    recap (a blockquote) can reference real numbers
 //
 // Best-effort: anything that needs the GitHub API is wrapped so the git-derived
-// stats (commits, days, pace, day/night) always render even if `gh` is missing
-// or rate-limited. Shared verbatim across every duyet repo via
-// duyet/llm-release-action.
+// stats (commits, issues, days, pace, peak hour, day/night) always render even
+// if `gh` is missing or rate-limited. Shared verbatim across every duyet repo
+// via duyet/llm-release-action.
 //
 // Env: RANGE (e.g. v0.2.7..HEAD or HEAD), RELEASE_TAG, PREVIOUS_TAG,
 //      GITHUB_REPOSITORY, GH_TOKEN/GITHUB_TOKEN (for gh api).
@@ -43,21 +43,44 @@ try {
   lines = []
 }
 
+// Issues closed: best-effort scan of commit bodies for closes/fixes/resolves #N
+// (these live in the footer, so we need full bodies %B, not just subjects %s).
+let bodies = ''
+try {
+  bodies = sh(`git log --no-merges --pretty=format:'%B' ${RANGE}`)
+} catch {
+  bodies = ''
+}
+const issuesClosed = new Set()
+for (const line of bodies.split(/[\r\n]+/)) {
+  if (/(?:closes?|fixes?|resolves?|closed|fixed|resolved)/i.test(line)) {
+    for (const n of line.matchAll(/#(\d+)/g)) issuesClosed.add(n[1])
+  }
+}
+
 const commitCount = lines.length
 const authors = new Set()
+const contributors = new Map() // name -> {name, commits, isAgent}
 const prNums = new Set()
+const hours = new Array(24).fill(0)
 let day = 0
 let night = 0
 let minT = Infinity
 let maxT = -Infinity
 for (const l of lines) {
   const [, iso, an, subj] = l.split('\t')
-  if (an) authors.add(an)
+  if (an) {
+    authors.add(an)
+    const c = contributors.get(an) || { name: an, commits: 0, isAgent: isAgent(an) }
+    c.commits++
+    contributors.set(an, c)
+  }
   const t = Date.parse(iso)
   if (!Number.isNaN(t)) {
     minT = Math.min(minT, t)
     maxT = Math.max(maxT, t)
     const h = new Date(t).getUTCHours()
+    hours[h]++
     if (h >= 6 && h < 18) day++
     else night++
   }
@@ -67,6 +90,8 @@ for (const l of lines) {
 
 const spanDays = maxT > minT ? Math.max(1, Math.round((maxT - minT) / 86400000)) : 1
 const pace = commitCount ? (commitCount / spanDays).toFixed(1) : '0'
+const peakHour = hours.indexOf(Math.max(...hours))
+const topContributors = [...contributors.values()].sort((a, b) => b.commits - a.commits).slice(0, 5)
 
 // --- GitHub API stats (best-effort) ---
 const agentStats = new Map() // login -> {comments, reviews, approvals, type}
@@ -105,31 +130,36 @@ const agents = [...agentStats.entries()]
 const topAgent = agents[0]
 
 // --- render ---
-const dayNight = day + night > 0 ? `🌞 ${day} daytime · 🌙 ${night} night-time` : ''
 const md = ['## 📊 Release recap', '']
 md.push(`- 📦 **${commitCount} commit${commitCount === 1 ? '' : 's'}**${prNums.size ? ` across **${prNums.size} pull request${prNums.size === 1 ? '' : 's'}**` : ''}`)
+if (issuesClosed.size) md.push(`- 🧯 Closed **${issuesClosed.size} issue${issuesClosed.size === 1 ? '' : 's'}**`)
 md.push(`- 🗓️ Shipped over **${spanDays} day${spanDays === 1 ? '' : 's'}** — pace **~${pace} commits/day**`)
-if (dayNight) md.push(`- ${dayNight} commits`)
+if (peakHour >= 0 && hours[peakHour] > 0) md.push(`- ⏰ Peak hour **${String(peakHour).padStart(2, '0')}:00 UTC** · 🌞 ${day} day / 🌙 ${night} night`)
+else if (day + night > 0) md.push(`- 🌞 ${day} day / 🌙 ${night} night`)
 if (authors.size) md.push(`- 👥 **${authors.size} contributor${authors.size === 1 ? '' : 's'}**`)
 if (totalComments) md.push(`- 💬 **${totalComments} comment${totalComments === 1 ? '' : 's'}** back and forth across reviews`)
 if (agents.length) md.push(`- 🤖 **${agents.length} AI agent${agents.length === 1 ? '' : 's'}** involved`)
-if (topAgent) {
-  md.push(
-    `- 🏆 Shoutout to **@${topAgent.login}** — ${topAgent.comments} comment${topAgent.comments === 1 ? '' : 's'}, ${topAgent.reviews} code review${topAgent.reviews === 1 ? '' : 's'}, ${topAgent.approvals} approval${topAgent.approvals === 1 ? '' : 's'}`,
-  )
+if (topContributors.length) {
+  const list = topContributors.map((c) => `${c.isAgent ? '🤖' : '👤'} **${c.name}** (${c.commits})`).join(', ')
+  md.push(`- 🙌 Top contributors: ${list}`)
 }
 writeFileSync('recap.md', `${md.join('\n')}\n`)
 
 const facts = [
   `commits: ${commitCount}`,
   `pull_requests: ${prNums.size}`,
+  `issues_closed: ${issuesClosed.size}`,
   `span_days: ${spanDays}`,
   `pace_per_day: ${pace}`,
+  `peak_hour_utc: ${peakHour >= 0 && hours[peakHour] > 0 ? peakHour : 'n/a'}`,
   `daytime_commits: ${day}`,
   `nighttime_commits: ${night}`,
   `contributors: ${authors.size}`,
   `review_comments: ${totalComments}`,
   `agents_involved: ${agents.length}`,
+  topContributors.length
+    ? `top_contributors: ${topContributors.map((c) => `${c.name}(${c.commits}${c.isAgent ? ', ai' : ''})`).join(', ')}`
+    : 'top_contributors: none',
   topAgent
     ? `most_active_agent: @${topAgent.login} (${topAgent.comments} comments, ${topAgent.reviews} reviews, ${topAgent.approvals} approvals)`
     : 'most_active_agent: none',

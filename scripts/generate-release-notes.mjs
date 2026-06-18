@@ -50,8 +50,26 @@ if (dockerImage && dockerVersion) {
 }
 
 if (previousTag && releaseTag && repo) {
+  const releaseUrl = `${server}/${repo}/releases/tag/${releaseTag}`
+  const compareUrl = `${server}/${repo}/compare/${previousTag}...${releaseTag}`
   sections.push(
-    `## 🔁 Full changelog\n\n**Compare:** [\`${previousTag}...${releaseTag}\`](${server}/${repo}/compare/${previousTag}...${releaseTag})`,
+    `## 🔁 Full changelog\n\n**Compare:** [\`${previousTag}...${releaseTag}\`](${compareUrl})`,
+  )
+  sections.push(
+    [
+      '## 🤖 Upgrade with AI',
+      '',
+      `Release notes: [\`${releaseTag}\`](${releaseUrl})`,
+      '',
+      `Paste this into your AI agent to upgrade from \`${previousTag}\` to \`${releaseTag}\`:`,
+      '',
+      '```text',
+      `I'm currently on ${previousTag}. Read the ${releaseTag} release notes at`,
+      `${releaseUrl} (full diff: ${compareUrl}), then upgrade`,
+      `this project to ${releaseTag} — apply the breaking changes, follow any`,
+      'migration steps, and verify the build and tests still pass.',
+      '```',
+    ].join('\n'),
   )
 }
 

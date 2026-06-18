@@ -42,6 +42,21 @@ jobs:
           echo "$OUT" | grep -q "FROM ghcr.io/duyet/example:9.9.9"
           echo "$OUT" | grep -q "compare/v9.9.8...v9.9.9"
           echo "$OUT" | grep -q "summary by .copilot."
+          echo "$OUT" | grep -q "releases/tag/v9.9.9"
+          echo "$OUT" | grep -q "Upgrade with AI"
+
+      - name: Smoke-test recap rendering
+        env:
+          RANGE: HEAD
+          RELEASE_TAG: v9.9.9
+          PREVIOUS_TAG: v9.9.8
+          GITHUB_REPOSITORY: duyet/llm-release-action
+        run: |
+          node scripts/release-recap.mjs >/dev/null
+          grep -q "📊 Release recap" recap.md
+          grep -q "commit" recap.md
+          grep -q "Peak hour" recap.md
+          grep -q "Top contributors" recap.md
 
       - name: Validate action.yml
         run: |
